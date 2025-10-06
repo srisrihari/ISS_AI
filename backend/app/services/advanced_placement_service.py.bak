@@ -1,0 +1,910 @@
+from typing import List, Dict, Tuple, Optional, Set
+import numpy as np
+from datetime import datetime
+from ..models.schemas import ItemBase, ContainerBase, PlacementItem, RearrangementStep, Position, Coordinates
+from ..models.database import Item, Container, Log, SessionLocal
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("placement_service")
+
+class AdvancedPlacementService:
+    """
+    Advanced placement service with more sophisticated algorithms for optimizing
+    item placement in containers.
+    """
+    def __init__(self):
+        self.db = SessionLocal()
+    
+    def __del__(self):
+        self.db.close()
+    
+    def place_items(self, items: List[ItemBase], containers: List[ContainerBase]) -> Tuple[List[PlacementItem], List[RearrangementStep]]:
+        """
+        Place items in containers using advanced optimization algorithms.
+        Returns a tuple of (placements, rearrangements)
+        """
+        logger.info(f"Starting placement of {len(items)} items in {len(containers)} containers")
+        
+        # Convert items and containers to internal format
+        items_data = [self._convert_item_to_internal(item) for item in items]
+        containers_data = {container.containerId: self._convert_container_to_internal(container) for container in containers}
+        
+        # Sort items by multiple criteria:
+        # 1. Priority (highest first)
+        # 2. Volume (largest first)
+        # 3. Expiry date (soonest first, if available)
+        items_data.sort(key=lambda x: (
+            -x["priority"],
+            -(x["width"] * x["depth"] * x["height"]),
+            x.get("expiryDate", "9999-12-31")
+        ))
+        
+        placements = []
+        rearrangements = []
+        unplaced_items = []
+        
+        # First pass: Try to place items in their preferred zones
+        for item in items_data:
+            logger.debug(f"Trying to place item {item['itemId']} (priority: {item['priority']}) in preferred zone {item['preferredZone']}")
+            preferred_zone = item["preferredZone"]
+            preferred_containers = [c for c_id, c in containers_data.items() if c["zone"] == preferred_zone]
+            
+            # Sort containers by available space and optimization potential
+            preferred_containers.sort(key=lambda c: self._calculate_container_efficiency(c, item), reverse=True)
+            
+            placed = False
+            
+            # Try each container
+            for container in preferred_containers:
+                # Try all possible orientations and positions
+                best_position = self._find_optimal_position(item, container)
+                
+                if best_position:
+                    # Item can be placed in this container
+                    placement = PlacementItem(
+                        itemId=item["itemId"],
+                        containerId=container["containerId"],
+                        position=Position(
+                            startCoordinates=Coordinates(
+                                width=best_position[0],
+                                depth=best_position[1],
+                                height=best_position[2]
+                            ),
+                            endCoordinates=Coordinates(
+                                width=best_position[0] + best_position[3],
+                                depth=best_position[1] + best_position[4],
+                                height=best_position[2] + best_position[5]
+                            )
+                        )
+                    )
+                    placements.append(placement)
+                    placed = True
+                    
+                    # Update container space
+                    self._update_container_space(container, best_position, item)
+                    item["placed"] = True
+                    logger.debug(f"Item {item['itemId']} placed in preferred container {container['containerId']}")
+                    break
+            
+            if not placed:
+                unplaced_items.append(item)
+        
+        logger.info(f"First pass complete. {len(placements)} items placed, {len(unplaced_items)} items unplaced.")
+        
+        # Second pass: Try to place remaining items in any container
+        for item in unplaced_items:
+            logger.debug(f"Second pass: Trying to place item {item['itemId']} in any container")
+            all_containers = list(containers_data.values())
+            
+            # Sort containers by available space efficiency
+            all_containers.sort(key=lambda c: self._calculate_container_efficiency(c, item), reverse=True)
+            
+            placed = False
+            
+            # Try each container
+            for container in all_containers:
+                # Try all possible orientations and positions
+                best_position = self._find_optimal_position(item, container)
+                
+                if best_position:
+                    # Item can be placed in this container
+                    placement = PlacementItem(
+                        itemId=item["itemId"],
+                        containerId=container["containerId"],
+                        position=Position(
+                            startCoordinates=Coordinates(
+                                width=best_position[0],
+                                depth=best_position[1],
+                                height=best_position[2]
+                            ),
+                            endCoordinates=Coordinates(
+                                width=best_position[0] + best_position[3],
+                                depth=best_position[1] + best_position[4],
+                                height=best_position[2] + best_position[5]
+                            )
+                        )
+                    )
+                    placements.append(placement)
+                    placed = True
+                    
+                    # Update container space
+                    self._update_container_space(container, best_position, item)
+                    item["placed"] = True
+                    logger.debug(f"Item {item['itemId']} placed in non-preferred container {container['containerId']}")
+                    break
+            
+            if not placed:
+                # Try rearrangement
+                logger.debug(f"Attempting rearrangement for item {item['itemId']}")
+                rearrangement_result = self._try_advanced_rearrangement(item, containers_data, items_data)
+                
+                if rearrangement_result:
+                    rearrangements.extend(rearrangement_result[0])
+                    placements.append(rearrangement_result[1])
+                    item["placed"] = True
+                    logger.debug(f"Successfully rearranged to place item {item['itemId']}")
+                else:
+                    logger.warning(f"Could not place item {item['itemId']} even after trying rearrangement")
+        
+        logger.info(f"Placement complete. {len(placements)} items placed, {len(rearrangements)} rearrangement steps")
+        
+        # Save placements to database
+        self._save_placements_to_db(placements)
+        
+        return placements, rearrangements
+    
+    def _convert_item_to_internal(self, item: ItemBase) -> Dict:
+        """Convert Pydantic item model to internal dictionary format"""
+        return {
+            "itemId": item.itemId,
+            "name": item.name,
+            "width": item.width,
+            "depth": item.depth,
+            "height": item.height,
+            "priority": item.priority,
+            "expiryDate": item.expiryDate,
+            "usageLimit": item.usageLimit,
+            "preferredZone": item.preferredZone,
+            "mass": getattr(item, "mass", 1.0),  # Default to 1.0 if mass not provided
+            "placed": False,
+            "volume": item.width * item.depth * item.height
+        }
+    
+    def _convert_container_to_internal(self, container: ContainerBase) -> Dict:
+        """Convert Pydantic container model to internal dictionary format"""
+        width = int(container.width)
+        depth = int(container.depth)
+        height = int(container.height)
+        
+        return {
+            "containerId": container.containerId,
+            "zone": container.zone,
+            "width": container.width,
+            "depth": container.depth,
+            "height": container.height,
+            "space": np.zeros((width, depth, height), dtype=bool),
+            "items": [],
+            "total_volume": container.width * container.depth * container.height,
+            "used_volume": 0.0,
+            "center_of_mass": (width/2, depth/2, height/2),  # Initial center of mass
+            "total_mass": 0.0  # Total mass of items in container
+        }
+    
+    def _calculate_container_efficiency(self, container: Dict, item: Dict) -> float:
+        """
+        Calculate how efficiently an item can be placed in a container.
+        Returns a score where higher is better.
+        """
+        # Calculate remaining volume
+        remaining_volume = container["total_volume"] - container["used_volume"]
+        
+        # If the container doesn't have enough space, return a very low score
+        if item["volume"] > remaining_volume:
+            return -1000
+        
+        # Calculate space utilization after placing the item
+        utilization = (container["used_volume"] + item["volume"]) / container["total_volume"]
+        
+        # Prefer containers in the item's preferred zone (higher score)
+        zone_match = 2.0 if container["zone"] == item["preferredZone"] else 1.0
+        
+        # Prefer containers with fewer items (easier access)
+        item_count_factor = 1.0 / (len(container["items"]) + 1)
+        
+        # Calculate how well the item fits in the container dimensions
+        shape_fit = min(
+            container["width"] / item["width"],
+            container["depth"] / item["depth"], 
+            container["height"] / item["height"]
+        )
+        
+        # Normalize shape_fit to 0-1 range
+        if shape_fit > 5:
+            shape_fit_score = 0.2  # Penalize vastly oversized containers
+        else:
+            shape_fit_score = 0.5 + 0.5 * (1 - min(1, abs(shape_fit - 1)))  # 1.0 is perfect fit
+        
+        # Combine factors with weights
+        efficiency_score = (
+            0.4 * utilization +
+            0.3 * zone_match +
+            0.2 * item_count_factor +
+            0.1 * shape_fit_score
+        )
+        
+        return efficiency_score
+    
+    def _find_optimal_position(self, item: Dict, container: Dict) -> Optional[Tuple[float, float, float, float, float, float]]:
+        """
+        Find the optimal position for an item in a container using a multi-criteria optimization approach.
+        Returns (x, y, z, width, depth, height) or None if no position found.
+        """
+        # Get all possible orientations of the item
+        orientations = [
+            (item["width"], item["depth"], item["height"]),
+            (item["depth"], item["width"], item["height"]),
+            (item["width"], item["height"], item["depth"]),
+            (item["height"], item["width"], item["depth"]),
+            (item["depth"], item["height"], item["width"]),
+            (item["height"], item["depth"], item["width"])
+        ]
+        
+        best_position = None
+        best_score = -float('inf')
+        
+        # Define weights for different criteria
+        weights = {
+            "space_utilization": 0.35,   # How well does this use the available space
+            "accessibility": 0.30,       # How accessible will this item be
+            "stability": 0.20,          # How stable is the arrangement
+            "priority_alignment": 0.15   # Does this placement align with item priority
+        }
+        
+        # For each orientation, evaluate all possible positions
+        for w, d, h in orientations:
+            # Check if item fits in container with this orientation
+            if w > container["width"] or d > container["depth"] or h > container["height"]:
+                continue
+            
+            # Optimize search patterns based on priority:
+            # For high priority items, start search near the front of the container
+            # For low priority items, start from the back
+            if item["priority"] > 70:
+                # High priority - search from front to back
+                # Start with positions closer to the front (lower y values)
+                j_range = range(int(container["depth"] - d + 1))
+            else:
+                # Low priority - search from back to front
+                # Start with positions closer to the back (higher y values)
+                j_range = range(int(container["depth"] - d), -1, -1)
+            
+            # Evaluate positions in a 3D grid
+            for i in range(int(container["width"] - w + 1)):
+                for j in j_range:
+                    # Find the best height starting from the bottom
+                    # (items should rest on the floor or other items)
+                    k_values = self._find_valid_heights(container, i, j, w, d, h)
+                    
+                    for k in k_values:
+                        # Calculate multi-criteria score for this position
+                        score = self._calculate_position_score_advanced(
+                            container, i, j, k, w, d, h, item["priority"], item["mass"]
+                        )
+                        
+                        if score > best_score:
+                            best_score = score
+                            best_position = (float(i), float(j), float(k), w, d, h)
+        
+        return best_position
+    
+    def _find_valid_heights(self, container: Dict, i: int, j: int, w: float, d: float, h: float) -> List[int]:
+        """
+        Find valid height positions for an item at (i,j) with dimensions (w,d,h).
+        Prioritizes positions where the item can rest on something (floor or another item).
+        """
+        valid_heights = []
+        
+        # Start with the bottom (floor) position
+        valid_heights.append(0)
+        
+        # Look for positions where the item would rest on top of other items
+        for existing_item in container["items"]:
+            item_pos = existing_item["position"]
+            item_i, item_j, item_k = int(item_pos[0]), int(item_pos[1]), int(item_pos[2])
+            item_w, item_d, item_h = int(item_pos[3]), int(item_pos[4]), int(item_pos[5])
+            
+            # Check if there's overlap in the x-y plane
+            if (i < item_i + item_w and i + w > item_i and 
+                j < item_j + item_d and j + d > item_j):
+                # Add the position directly on top of this item
+                top_k = item_k + item_h
+                
+                # Make sure the item doesn't extend beyond the container height
+                if top_k + h <= container["height"]:
+                    # Check for collision with other items
+                    has_collision = False
+                    for other_item in container["items"]:
+                        other_pos = other_item["position"]
+                        other_i = int(other_pos[0])
+                        other_j = int(other_pos[1])
+                        other_k = int(other_pos[2])
+                        other_w = int(other_pos[3])
+                        other_d = int(other_pos[4])
+                        other_h = int(other_pos[5])
+                        
+                        if (i < other_i + other_w and i + w > other_i and 
+                            j < other_j + other_d and j + d > other_j and 
+                            top_k < other_k + other_h and top_k + h > other_k):
+                            has_collision = True
+                            break
+                    
+                    if not has_collision:
+                        valid_heights.append(top_k)
+        
+        return valid_heights
+    
+    def _calculate_position_score_advanced(self, container: Dict, i: int, j: int, k: int, 
+                                         w: float, d: float, h: float, priority: int, mass: float) -> float:
+        """
+        Calculate a comprehensive score for a potential position based on multiple criteria:
+        1. Space utilization - how well the placement uses available space
+        2. Accessibility - how easily the item can be retrieved
+        3. Stability - how stable the arrangement is
+        4. Priority alignment - high priority items should be more accessible
+        
+        Higher scores are better.
+        """
+        # 1. Space utilization score
+        # Prefer positions that fit well with existing items (minimize wasted space)
+        contact_score = 0
+        max_contact = 2 * (w * d + w * h + d * h)  # Max possible contact surface
+        
+        # Check bottom contact (always count floor as contact)
+        if k == 0:
+            contact_score += w * d  # Contact with container floor
+        
+        # Check contacts with other items
+        for existing_item in container["items"]:
+            item_pos = existing_item["position"]
+            item_i, item_j, item_k = int(item_pos[0]), int(item_pos[1]), int(item_pos[2])
+            item_w, item_d, item_h = int(item_pos[3]), int(item_pos[4]), int(item_pos[5])
+            
+            # Check bottom contact
+            if k == item_k + item_h and (
+                i < item_i + item_w and i + w > item_i and 
+                j < item_j + item_d and j + d > item_j
+            ):
+                # Calculate overlap area
+                overlap_width = min(i + w, item_i + item_w) - max(i, item_i)
+                overlap_depth = min(j + d, item_j + item_d) - max(j, item_j)
+                contact_score += overlap_width * overlap_depth
+            
+            # Check top contact
+            if k + h == item_k and (
+                i < item_i + item_w and i + w > item_i and 
+                j < item_j + item_d and j + d > item_j
+            ):
+                # Calculate overlap area
+                overlap_width = min(i + w, item_i + item_w) - max(i, item_i)
+                overlap_depth = min(j + d, item_j + item_d) - max(j, item_j)
+                contact_score += overlap_width * overlap_depth
+            
+            # Check side contacts
+            # X direction
+            if (
+                (i + w == item_i or i == item_i + item_w) and
+                j < item_j + item_d and j + d > item_j and
+                k < item_k + item_h and k + h > item_k
+            ):
+                # Calculate overlap area
+                overlap_depth = min(j + d, item_j + item_d) - max(j, item_j)
+                overlap_height = min(k + h, item_k + item_h) - max(k, item_k)
+                contact_score += overlap_depth * overlap_height
+            
+            # Y direction
+            if (
+                (j + d == item_j or j == item_j + item_d) and
+                i < item_i + item_w and i + w > item_i and
+                k < item_k + item_h and k + h > item_k
+            ):
+                # Calculate overlap area
+                overlap_width = min(i + w, item_i + item_w) - max(i, item_i)
+                overlap_height = min(k + h, item_k + item_h) - max(k, item_k)
+                contact_score += overlap_width * overlap_height
+        
+        # Check wall contacts
+        if i == 0 or i + w == container["width"]:
+            contact_score += d * h  # Contact with container wall
+        
+        if j == 0 or j + d == container["depth"]:
+            contact_score += w * h  # Contact with container wall
+        
+        if k + h == container["height"]:
+            contact_score += w * d  # Contact with container ceiling
+        
+        # Normalize contact score
+        space_utilization = contact_score / max_contact if max_contact > 0 else 0
+        
+        # 2. Accessibility score
+        # Items at the front of the container are more accessible
+        depth_accessibility = 1.0 - (j / container["depth"])
+        
+        # Items at a comfortable height are more accessible
+        height_sweet_spot = container["height"] * 0.4  # Around waist height
+        height_accessibility = 1.0 - min(1.0, abs(k - height_sweet_spot) / (container["height"] * 0.5))
+        
+        # Combined accessibility score with bias towards depth (front-back) accessibility
+        accessibility = 0.7 * depth_accessibility + 0.3 * height_accessibility
+        
+        # 3. Stability score
+        # Items with lower center of mass are more stable
+        height_stability = 1.0 - ((k + h/2) / container["height"])
+        
+        # Items with more contact area below them are more stable
+        bottom_contact = 0
+        max_bottom_contact = w * d
+        
+        if k == 0:
+            # Contact with floor provides maximum stability
+            bottom_contact = max_bottom_contact
+        else:
+            # Check for items below
+            for existing_item in container["items"]:
+                item_pos = existing_item["position"]
+                item_i, item_j, item_k = int(item_pos[0]), int(item_pos[1]), int(item_pos[2])
+                item_w, item_d, item_h = int(item_pos[3]), int(item_pos[4]), int(item_pos[5])
+                
+                if k == item_k + item_h and (
+                    i < item_i + item_w and i + w > item_i and 
+                    j < item_j + item_d and j + d > item_j
+                ):
+                    # Calculate overlap area
+                    overlap_width = min(i + w, item_i + item_w) - max(i, item_i)
+                    overlap_depth = min(j + d, item_j + item_d) - max(j, item_j)
+                    bottom_contact += overlap_width * overlap_depth
+        
+        support_stability = bottom_contact / max_bottom_contact
+        
+        # Combine stability metrics
+        stability = 0.6 * support_stability + 0.4 * height_stability
+        
+        # 4. Priority alignment
+        # Higher priority items should be more accessible (low depth, optimal height)
+        normalized_priority = priority / 100.0
+        
+        # Calculate center of mass impact
+        current_com_x, current_com_y, current_com_z = container["center_of_mass"]
+        total_mass = container["total_mass"] + mass
+        
+        if total_mass > 0:
+            # Calculate new center of mass with this item added
+            new_com_x = (current_com_x * container["total_mass"] + (i + w/2) * mass) / total_mass
+            new_com_y = (current_com_y * container["total_mass"] + (j + d/2) * mass) / total_mass
+            new_com_z = (current_com_z * container["total_mass"] + (k + h/2) * mass) / total_mass
+            
+            # Calculate how balanced the COM is (closer to center is better)
+            container_center_x = container["width"] / 2
+            container_center_y = container["depth"] / 2
+            
+            com_deviation = (
+                abs(new_com_x - container_center_x) / container_center_x +
+                abs(new_com_y - container_center_y) / container_center_y
+            ) / 2
+            
+            # Higher score for more balanced COM
+            balance_score = 1.0 - min(1.0, com_deviation)
+        else:
+            balance_score = 1.0
+        
+        # Priority-based accessibility score
+        priority_alignment = (
+            0.7 * depth_accessibility * normalized_priority + 
+            0.3 * height_accessibility * normalized_priority
+        )
+        
+        # Combine scores with weights
+        weights = {
+            "space_utilization": 0.35,
+            "accessibility": 0.30,
+            "stability": 0.25,
+            "priority_alignment": 0.10
+        }
+        
+        total_score = (
+            weights["space_utilization"] * space_utilization +
+            weights["accessibility"] * accessibility +
+            weights["stability"] * stability +
+            weights["priority_alignment"] * priority_alignment
+        )
+        
+        # Balance score is a penalty/bonus factor
+        total_score = total_score * (0.8 + 0.2 * balance_score)
+        
+        return total_score
+    
+    def _update_container_space(self, container: Dict, position: Tuple[float, float, float, float, float, float], item: Dict = None):
+        """Update the container space after placing an item"""
+        i, j, k, w, d, h = position
+        
+        # Mark space as occupied
+        i_int, j_int, k_int = int(i), int(j), int(k)
+        w_int, d_int, h_int = int(w), int(d), int(h)
+        
+        # Ensure we're not accessing out of bounds
+        w_end = min(i_int + w_int, int(container["width"]))
+        d_end = min(j_int + d_int, int(container["depth"]))
+        h_end = min(k_int + h_int, int(container["height"]))
+        
+        container["space"][i_int:w_end, j_int:d_end, k_int:h_end] = True
+        
+        # Update used volume
+        container["used_volume"] += w * d * h
+        
+        # Create a new item entry
+        new_item = {
+            "position": position,
+            "volume": w * d * h
+        }
+        
+        # Add item-specific information if available
+        if item:
+            new_item["itemId"] = item["itemId"]
+            new_item["mass"] = item.get("mass", 1.0)
+            
+            # Update center of mass
+            total_mass = container["total_mass"] + new_item["mass"]
+            container["total_mass"] = total_mass
+            
+            if total_mass > 0:
+                current_com_x, current_com_y, current_com_z = container["center_of_mass"]
+                item_com_x, item_com_y, item_com_z = i + w/2, j + d/2, k + h/2
+                
+                container["center_of_mass"] = (
+                    (current_com_x * container["total_mass"] + item_com_x * new_item["mass"]) / total_mass,
+                    (current_com_y * container["total_mass"] + item_com_y * new_item["mass"]) / total_mass,
+                    (current_com_z * container["total_mass"] + item_com_z * new_item["mass"]) / total_mass
+                )
+        
+        # Add item to container's items
+        container["items"].append(new_item)
+    
+    def _try_advanced_rearrangement(self, item: Dict, containers: Dict[str, Dict], items_data: List[Dict]) -> Optional[Tuple[List[RearrangementStep], PlacementItem]]:
+        """
+        Try to rearrange items to make space for the new item using an advanced optimization approach.
+        Considers multiple rearrangement paths and evaluates their efficiency.
+        Returns a tuple of (rearrangement_steps, placement) or None if not possible.
+        """
+        # Phase 1: Identify candidate containers for rearrangement
+        candidate_containers = []
+        
+        for container_id, container in containers.items():
+            # Check if the container's total volume could accommodate the item
+            remaining_volume = container["total_volume"] - container["used_volume"]
+            if remaining_volume >= item["volume"] * 0.8:  # Allow some margin
+                candidate_containers.append((container_id, container))
+        
+        # Sort containers by how close they are to fitting the item
+        candidate_containers.sort(key=lambda x: abs(x[1]["total_volume"] - x[1]["used_volume"] - item["volume"]))
+        
+        # Phase 2: For each candidate container, evaluate possible rearrangements
+        best_rearrangement = None
+        best_score = float('-inf')
+        
+        for container_id, container in candidate_containers:
+            # Get items in this container
+            container_items = []
+            for placed_item in items_data:
+                if placed_item["placed"]:
+                    # Check if this item is in the current container
+                    for container_item in container["items"]:
+                        if container_item.get("itemId") == placed_item["itemId"]:
+                            container_items.append((placed_item, container_item))
+                            break
+            
+            # Try different combinations of items to remove
+            # Start with one item and progressively try more if needed
+            for removal_count in range(1, min(5, len(container_items) + 1)):
+                for combo in self._get_combinations_by_priority(container_items, removal_count, item["priority"]):
+                    # Calculate total volume of items to remove
+                    total_volume_to_remove = sum(placed_item["volume"] for placed_item, _ in combo)
+                    
+                    # Check if removing these items would free enough space
+                    if total_volume_to_remove >= item["volume"]:
+                        # Try to place the removed items in other containers
+                        rearrangement_result = self._evaluate_rearrangement(item, combo, container_id, container, containers)
+                        
+                        if rearrangement_result:
+                            rearrangement_steps, placement, score = rearrangement_result
+                            
+                            if score > best_score:
+                                best_score = score
+                                best_rearrangement = (rearrangement_steps, placement)
+                            
+                            # If we found a good enough solution, return it
+                            if score > 0.8:
+                                return best_rearrangement
+        
+        return best_rearrangement
+    
+    def _get_combinations_by_priority(self, items: List[Tuple[Dict, Dict]], count: int, target_priority: int) -> List[List[Tuple[Dict, Dict]]]:
+        """
+        Get combinations of items to consider for removal, prioritizing lower priority items
+        and items that are closest to the front of the container.
+        """
+        # Sort items by priority (lowest first) and position (front first)
+        items_sorted = sorted(items, key=lambda x: (x[0]["priority"], -x[1]["position"][1]))
+        
+        # Filter out items with higher priority than the target item
+        items_filtered = [item for item in items_sorted if item[0]["priority"] < target_priority]
+        
+        # If not enough items with lower priority, include some higher priority items from the back
+        if len(items_filtered) < count:
+            # Sort remaining items by priority and position (from back)
+            remaining = sorted([item for item in items_sorted if item not in items_filtered], 
+                               key=lambda x: (x[0]["priority"], x[1]["position"][1]), reverse=True)
+            items_filtered.extend(remaining[:count - len(items_filtered)])
+        
+        # Generate combinations of the specified count
+        import itertools
+        return list(itertools.combinations(items_filtered, count))
+    
+    def _evaluate_rearrangement(self, item: Dict, items_to_remove: List[Tuple[Dict, Dict]], 
+                               source_container_id: str, source_container: Dict, 
+                               containers: Dict[str, Dict]) -> Optional[Tuple[List[RearrangementStep], PlacementItem, float]]:
+        """
+        Evaluate a potential rearrangement by:
+        1. Removing specified items from source container
+        2. Trying to place the target item in the freed space
+        3. Finding new homes for the removed items
+        
+        Returns (rearrangement_steps, placement, score) or None if rearrangement is not possible.
+        """
+        # Create a temporary copy of the containers
+        temp_containers = self._create_container_copies(containers)
+        temp_source_container = temp_containers[source_container_id]
+        
+        # Remove items from source container
+        for placed_item, container_item in items_to_remove:
+            # Remove item from container space
+            position = container_item["position"]
+            i, j, k, w, d, h = position
+            
+            # Update container space
+            x1, y1, z1 = int(i), int(j), int(k)
+            x2, y2, z2 = x1 + int(w), y1 + int(d), z1 + int(h)
+            temp_source_container["space"][x1:x2, y1:y2, z1:z2] = False
+            
+            # Update used volume
+            temp_source_container["used_volume"] -= w * d * h
+            
+            # Remove from items list
+            temp_source_container["items"] = [i for i in temp_source_container["items"] 
+                                           if i.get("itemId") != placed_item["itemId"]]
+        
+        # Try to place the target item in the source container
+        position = self._find_optimal_position(item, temp_source_container)
+        
+        if not position:
+            return None  # Couldn't place the item even after removing others
+        
+        # Place the target item
+        placement = PlacementItem(
+            itemId=item["itemId"],
+            containerId=source_container_id,
+            position=Position(
+                startCoordinates=Coordinates(
+                    width=position[0],
+                    depth=position[1],
+                    height=position[2]
+                ),
+                endCoordinates=Coordinates(
+                    width=position[0] + position[3],
+                    depth=position[1] + position[4],
+                    height=position[2] + position[5]
+                )
+            )
+        )
+        
+        # Update container space
+        self._update_container_space(temp_source_container, position)
+        
+        # Try to place removed items in other containers
+        new_placements = []
+        for placed_item, _ in items_to_remove:
+            # Try all containers except the source container
+            best_container_id = None
+            best_position = None
+            best_score = float('-inf')
+            
+            for container_id, container in temp_containers.items():
+                if container_id == source_container_id:
+                    continue  # Skip the source container
+                
+                # Try to find a position in this container
+                position = self._find_optimal_position(placed_item, container)
+                
+                if position:
+                    # Calculate a score for this placement
+                    score = self._calculate_rearrangement_score(placed_item, container, position)
+                    
+                    if score > best_score:
+                        best_score = score
+                        best_container_id = container_id
+                        best_position = position
+            
+            if best_container_id and best_position:
+                # Place the item in the best container
+                new_placements.append((placed_item, best_container_id, best_position))
+                
+                # Update the container space
+                self._update_container_space(temp_containers[best_container_id], best_position)
+            else:
+                return None  # Couldn't place one of the removed items
+        
+        # All items could be successfully rearranged!
+        # Create the rearrangement steps
+        rearrangement_steps = []
+        step_counter = 1
+        
+        # Steps to remove items from source container
+        for placed_item, container_item in items_to_remove:
+            position = container_item["position"]
+            
+            rearrangement_steps.append(
+                RearrangementStep(
+                    step=step_counter,
+                    action="remove",
+                    itemId=placed_item["itemId"],
+                    fromContainer=source_container_id,
+                    fromPosition=Position(
+                        startCoordinates=Coordinates(
+                            width=position[0],
+                            depth=position[1],
+                            height=position[2]
+                        ),
+                        endCoordinates=Coordinates(
+                            width=position[0] + position[3],
+                            depth=position[1] + position[4],
+                            height=position[2] + position[5]
+                        )
+                    ),
+                    toContainer="",
+                    toPosition=Position(
+                        startCoordinates=Coordinates(width=0, depth=0, height=0),
+                        endCoordinates=Coordinates(width=0, depth=0, height=0)
+                    )
+                )
+            )
+            step_counter += 1
+            
+        # Step to place the target item
+        rearrangement_steps.append(
+            RearrangementStep(
+                step=step_counter,
+                action="place",
+                itemId=item["itemId"],
+                fromContainer="",
+                fromPosition=Position(
+                    startCoordinates=Coordinates(width=0, depth=0, height=0),
+                    endCoordinates=Coordinates(width=0, depth=0, height=0)
+                ),
+                toContainer=source_container_id,
+                toPosition=placement.position
+            )
+        )
+        step_counter += 1
+        
+        # Steps to place removed items in their new containers
+        for placed_item, new_container_id, new_position in new_placements:
+            rearrangement_steps.append(
+                RearrangementStep(
+                    step=step_counter,
+                    action="place",
+                    itemId=placed_item["itemId"],
+                    fromContainer="",
+                    fromPosition=Position(
+                        startCoordinates=Coordinates(width=0, depth=0, height=0),
+                        endCoordinates=Coordinates(width=0, depth=0, height=0)
+                    ),
+                    toContainer=new_container_id,
+                    toPosition=Position(
+                        startCoordinates=Coordinates(
+                            width=new_position[0],
+                            depth=new_position[1],
+                            height=new_position[2]
+                        ),
+                        endCoordinates=Coordinates(
+                            width=new_position[0] + new_position[3],
+                            depth=new_position[1] + new_position[4],
+                            height=new_position[2] + new_position[5]
+                        )
+                    )
+                )
+            )
+            step_counter += 1
+        
+        # Calculate overall score for this rearrangement
+        # Fewer steps and less volume moved is better
+        total_volume_moved = sum(placed_item["volume"] for placed_item, _ in items_to_remove)
+        steps_count = len(rearrangement_steps)
+        
+        # Normalize scores (1.0 is best)
+        volume_score = 1.0 - (total_volume_moved / (item["volume"] * 3))  # Penalize moving too much
+        steps_score = 1.0 - (steps_count / 20.0)  # Assume 20 steps is the max
+        
+        # Prioritize having fewer steps
+        overall_score = 0.7 * steps_score + 0.3 * volume_score
+        
+        return rearrangement_steps, placement, overall_score
+    
+    def _create_container_copies(self, containers: Dict[str, Dict]) -> Dict[str, Dict]:
+        """Create deep copies of containers for simulation."""
+        import copy
+        return {
+            container_id: {
+                "containerId": container["containerId"],
+                "zone": container["zone"],
+                "width": container["width"],
+                "depth": container["depth"],
+                "height": container["height"],
+                "space": np.copy(container["space"]),
+                "items": copy.deepcopy(container["items"]),
+                "total_volume": container["total_volume"],
+                "used_volume": container["used_volume"],
+                "center_of_mass": container["center_of_mass"],
+                "total_mass": container["total_mass"]
+            }
+            for container_id, container in containers.items()
+        }
+    
+    def _calculate_rearrangement_score(self, item: Dict, container: Dict, position: Tuple[float, float, float, float, float, float]) -> float:
+        """
+        Calculate a score for placing an item in a container during rearrangement.
+        Considers:
+        1. Preferred zone match
+        2. Space utilization
+        3. Accessibility
+        """
+        # Zone match
+        zone_score = 1.0 if container["zone"] == item["preferredZone"] else 0.5
+        
+        # Calculate position-based score
+        position_score = self._calculate_position_score_advanced(container, 
+                                                             int(position[0]), 
+                                                             int(position[1]), 
+                                                             int(position[2]),
+                                                             position[3],
+                                                             position[4],
+                                                             position[5],
+                                                             item["priority"],
+                                                             item["mass"])
+        
+        # Combine scores
+        return 0.4 * zone_score + 0.6 * position_score
+    
+    def _save_placements_to_db(self, placements: List[PlacementItem]):
+        """Save all placements to the database"""
+        try:
+            for placement in placements:
+                # Find the item in the database
+                db_item = self.db.query(Item).filter(Item.id == placement.itemId).first()
+                
+                if db_item:
+                    # Update the item with the new container and position
+                    db_item.container_id = placement.containerId
+                    db_item.position_width = placement.position.startCoordinates.width
+                    db_item.position_depth = placement.position.startCoordinates.depth
+                    db_item.position_height = placement.position.startCoordinates.height
+                    
+                    logger.debug(f"Saving placement of item {placement.itemId} to database")
+            
+            # Commit all changes at once
+            self.db.commit()
+            logger.info(f"Saved {len(placements)} placements to database")
+            
+        except Exception as e:
+            self.db.rollback()
+            logger.error(f"Error saving placements to database: {str(e)}")
+            raise

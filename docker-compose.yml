@@ -1,0 +1,62 @@
+version: '3.8'
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: space-station-cargo:latest
+    container_name: space-station-cargo
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - app-data:/app/data
+    environment:
+      - DATABASE_URL=sqlite:///space_station_cargo.db
+      - DEBUG=0
+      - PORT=8000
+      - WORKERS=2
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - app-network
+
+  # You can uncomment this in the future if you decide to use a separate database
+  # db:
+  #   image: postgres:14-alpine
+  #   container_name: space-station-cargo-db
+  #   restart: unless-stopped
+  #   environment:
+  #     - POSTGRES_USER=cargo
+  #     - POSTGRES_PASSWORD=securepassword
+  #     - POSTGRES_DB=space_station_cargo
+  #   volumes:
+  #     - db-data:/var/lib/postgresql/data
+  #   deploy:
+  #     resources:
+  #       limits:
+  #         cpus: '0.5'
+  #         memory: 512M
+  #   networks:
+  #     - app-network
+
+networks:
+  app-network:
+    driver: bridge
+
+volumes:
+  app-data:
+  # db-data:

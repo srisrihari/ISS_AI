@@ -1,0 +1,3 @@
+Item ID,Name,Width (cm),Depth (cm),Height (cm),Mass (kg),Priority (1-100),Expiry Date (ISO Format),Usage Limit,Preferred Zone
+test001,Test Item 1,10,10,10,5,80,,10,Test Zone
+test002,Test Item 2,20,20,20,10,70,,5,Test Zone
