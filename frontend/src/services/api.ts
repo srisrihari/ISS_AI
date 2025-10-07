@@ -1,6 +1,8 @@
 import axios from 'axios'
 
-const API_URL = '/api'
+const rawBase = (import.meta as any).env?.VITE_API_BASE || ''
+const base = rawBase.endsWith('/') ? rawBase.slice(0, -1) : rawBase
+const API_URL = `${base}/api`
 
 // Types
 export interface Coordinates {
@@ -24,7 +26,7 @@ export interface Item {
   expiryDate?: string
   usageLimit: number
   preferredZone: string
-  mass: number
+  mass?: number
   remainingUses?: number
   isWaste?: boolean
 }

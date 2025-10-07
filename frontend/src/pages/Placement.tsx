@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { useLocation } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router-dom'
 import {
   Box,
   Button,
@@ -21,6 +21,7 @@ import { api, Item, Container, PlacementItem, RearrangementStep } from '../servi
 
 export default function Placement() {
   const location = useLocation()
+  const navigate = useNavigate()
   const [loading, setLoading] = useState(false)
   const [items, setItems] = useState<Item[]>([])
   const [containers, setContainers] = useState<Container[]>([])
@@ -127,6 +128,7 @@ export default function Placement() {
     priority: 50,
     usageLimit: 1,
     preferredZone: '',
+    mass: 0,
   })
 
   // Form state for adding containers
