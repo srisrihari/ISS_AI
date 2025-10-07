@@ -133,7 +133,8 @@ const WeightDistributionVisualization: React.FC<WeightDistributionVisualizationP
       
       try {
         // Fetch container data
-        const containerResponse = await fetch(`/api/containers/${containerId}`)
+        const API_BASE = (import.meta as any).env?.VITE_API_BASE || ''
+        const containerResponse = await fetch(`${API_BASE}/api/containers/${containerId}`)
         if (!containerResponse.ok) {
           throw new Error('Failed to fetch container data')
         }
@@ -141,7 +142,7 @@ const WeightDistributionVisualization: React.FC<WeightDistributionVisualizationP
         setContainer(containerData)
         
         // Fetch items in this container
-        const itemsResponse = await fetch(`/api/containers/${containerId}/items`)
+        const itemsResponse = await fetch(`${API_BASE}/api/containers/${containerId}/items`)
         if (!itemsResponse.ok) {
           throw new Error('Failed to fetch items data')
         }

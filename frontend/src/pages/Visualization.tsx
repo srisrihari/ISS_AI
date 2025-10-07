@@ -19,6 +19,7 @@ import {
 } from '@mui/material'
 import { api, Container, Item, Position } from '../services/api'
 import ContainerVisualization from '../components/ContainerVisualization'
+const API_BASE = (import.meta as any).env?.VITE_API_BASE || ''
 
 interface ContainerWithItems {
   container: Container
@@ -45,7 +46,7 @@ export default function Visualization() {
 
     try {
       // Fetch the current arrangement
-      const response = await fetch('/api/export/arrangement')
+      const response = await fetch(`${API_BASE}/api/export/arrangement`)
       const csvData = await response.text()
 
       // Parse CSV data
@@ -76,12 +77,12 @@ export default function Visualization() {
       }
 
       // Fetch all containers
-      const containersResponse = await fetch('/api/containers')
+      const containersResponse = await fetch(`${API_BASE}/api/containers`)
       const containersData = await containersResponse.json()
       const containers: Container[] = containersData.containers
 
       // Fetch all items
-      const itemsResponse = await fetch('/api/items')
+      const itemsResponse = await fetch(`${API_BASE}/api/items`)
       const itemsData = await itemsResponse.json()
       const items: Item[] = itemsData.items
 

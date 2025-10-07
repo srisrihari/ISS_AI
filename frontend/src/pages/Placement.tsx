@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
+const API_BASE = (import.meta as any).env?.VITE_API_BASE || ''
 import {
   Box,
   Button,
@@ -53,7 +54,7 @@ export default function Placement() {
 
   const fetchItemDetails = async (itemId: string) => {
     try {
-      const response = await fetch(`/api/search?itemId=${itemId}`)
+      const response = await fetch(`${API_BASE}/api/search?itemId=${itemId}`)
       const data = await response.json()
 
       if (data.found) {
@@ -89,7 +90,7 @@ export default function Placement() {
 
   const fetchContainerDetails = async (containerId: string) => {
     try {
-      const response = await fetch('/api/containers')
+      const response = await fetch(`${API_BASE}/api/containers`)
       const data = await response.json()
 
       const container = data.containers.find((c: any) => c.containerId === containerId)

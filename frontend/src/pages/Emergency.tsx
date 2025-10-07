@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+const API_BASE = (import.meta as any).env?.VITE_API_BASE || ''
 import {
   Box,
   Button,
@@ -103,7 +104,7 @@ export default function Emergency() {
     setError(null)
     
     try {
-      const response = await fetch('/api/emergency/critical-items')
+      const response = await fetch(`${API_BASE}/api/emergency/critical-items`)
       
       if (!response.ok) {
         throw new Error(`Failed to fetch critical items: ${response.statusText}`)
@@ -121,7 +122,7 @@ export default function Emergency() {
   
   const fetchAvailableZones = async () => {
     try {
-      const response = await fetch('/api/containers')
+      const response = await fetch(`${API_BASE}/api/containers`)
       
       if (!response.ok) {
         throw new Error(`Failed to fetch containers: ${response.statusText}`)
@@ -141,7 +142,7 @@ export default function Emergency() {
     setSuccess(null)
     
     try {
-      const response = await fetch('/api/emergency/optimize-access', {
+      const response = await fetch(`${API_BASE}/api/emergency/optimize-access`, {
         method: 'POST',
       })
       
@@ -192,7 +193,7 @@ export default function Emergency() {
     
     try {
       // Prepare URL and parameters
-      const url = '/api/emergency/declare'
+      const url = `${API_BASE}/api/emergency/declare`
       const params = new URLSearchParams()
       params.append('emergency_type', getEmergencyTypeLabel(emergencyType))
       

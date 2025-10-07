@@ -30,6 +30,7 @@ import {
 } from '@mui/material'
 import { api } from '../services/api'
 import { useNavigate } from 'react-router-dom'
+const API_BASE = (import.meta as any).env?.VITE_API_BASE || ''
 
 interface TabPanelProps {
   children?: React.ReactNode
@@ -78,12 +79,12 @@ export default function Inventory() {
 
     try {
       // Fetch items
-      const itemsResponse = await fetch('/api/items')
+      const itemsResponse = await fetch(`${API_BASE}/api/items`)
       const itemsData = await itemsResponse.json()
       setItems(itemsData.items || [])
 
       // Fetch containers
-      const containersResponse = await fetch('/api/containers')
+      const containersResponse = await fetch(`${API_BASE}/api/containers`)
       const containersData = await containersResponse.json()
       setContainers(containersData.containers || [])
     } catch (err) {
@@ -130,7 +131,7 @@ export default function Inventory() {
     }
 
     try {
-      const response = await fetch(`/api/items/${itemId}`, {
+      const response = await fetch(`${API_BASE}/api/items/${itemId}`, {
         method: 'DELETE',
       })
 
@@ -153,7 +154,7 @@ export default function Inventory() {
     }
 
     try {
-      const response = await fetch(`/api/items/${itemId}/delete`, {
+      const response = await fetch(`${API_BASE}/api/items/${itemId}/delete`, {
         method: 'DELETE',
       })
 
@@ -194,7 +195,7 @@ export default function Inventory() {
     try {
       await Promise.all(
         selectedItems.map((itemId) =>
-          fetch(`/api/items/${itemId}/delete`, {
+          fetch(`${API_BASE}/api/items/${itemId}/delete`, {
             method: 'DELETE',
           })
         )
